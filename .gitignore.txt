@@ -1,0 +1,16 @@
+# Project specific folders
+__pycache__/
+docs/
+pdf/
+
+# Databases
+my_local_vectordb/
+pdf_vector_db/
+
+# Secrets
+.env
+
+# Virtual environment
+venv/
+.venv/
+env/

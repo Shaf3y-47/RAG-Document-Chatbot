@@ -1,88 +1,54 @@
 import streamlit as st
 import requests
-import os
 
-# Page config
-st.set_page_config(page_title="RAG Document Chatbot", layout="wide")
+# FastAPI Backend URL
+BACKEND_URL = "http://localhost:8000"
 
-# Sidebar for API configuration
+st.set_page_config(page_title="RAG AI Assistant", layout="centered")
+st.title("🤖 RAG Document Assistant")
+
+# Sidebar: File Upload
 with st.sidebar:
-    st.header("⚙️ Configuration")
-    api_url = st.text_input(
-        "API URL",
-        value="http://localhost:8000",
-        help="FastAPI backend URL"
-    )
-    st.markdown("---")
-    
-    if st.button("🔄 Ingest Documents", use_container_width=True):
-        try:
-            with st.spinner("Ingesting documents..."):
-                response = requests.post(f"{api_url}/ingest", timeout=60)
-                response.raise_for_status()
-                data = response.json()
-                st.success(f"✅ {data['status']}")
-                st.info(f"📊 Total chunks in database: {data['chunks_found']}")
-        except requests.exceptions.ConnectionError:
-            st.error(f"❌ Cannot connect to API at {api_url}")
-        except requests.exceptions.RequestException as e:
-            st.error(f"❌ Error: {str(e)}")
+    st.header("Ingest Documents")
+    uploaded_file = st.file_uploader("Upload .txt or .pdf", type=["txt", "pdf"])
+    if st.button("Upload & Ingest"):
+        if uploaded_file:
+            files = {"file": (uploaded_file.name, uploaded_file, uploaded_file.type)}
+            with st.spinner("Processing..."):
+                response = requests.post(f"{BACKEND_URL}/ingest", files=files)
+                if response.status_code == 200:
+                    st.success("Ingestion successful!")
+                else:
+                    st.error(f"Error: {response.json().get('detail')}")
+        else:
+            st.warning("Please select a file first.")
 
-# Main content
-st.title("📚 RAG Document Chatbot")
-st.markdown("Ask questions about your documents. The AI will search for relevant context and answer based on it.")
-
-# Initialize session state for chat history
+# Main Chat Interface
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display chat history
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Chat input
-query = st.chat_input("Ask a question about your documents...")
-
-if query:
-    # Add user message to history
-    st.session_state.messages.append({"role": "user", "content": query})
-    
-    # Display user message
+if prompt := st.chat_input("Ask a question about your docs:"):
+    st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
-        st.markdown(query)
-    
-    # Get response from FastAPI
-    try:
-        with st.spinner("🤔 Thinking..."):
-            response = requests.post(
-                f"{api_url}/chat",
-                json={"question": query},
-                timeout=30
-            )
-            response.raise_for_status()
-            data = response.json()
-            answer = data["answer"]
-            sources = data.get("sources", [])
-            
-            # Add assistant message to history
-            st.session_state.messages.append({"role": "assistant", "content": answer})
-            
-            # Display assistant response
-            with st.chat_message("assistant"):
+        st.markdown(prompt)
+
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+            try:
+                response = requests.post(f"{BACKEND_URL}/chat", json={"question": prompt})
+                data = response.json()
+                answer = data.get("answer", "No response received.")
                 st.markdown(answer)
                 
-                # Show sources
-                if sources:
-                    with st.expander("📖 Sources"):
-                        for source in sources:
-                            st.caption(source)
-    
-    except requests.exceptions.ConnectionError:
-        st.error(f"❌ Cannot connect to API at {api_url}. Make sure FastAPI is running.")
-    except requests.exceptions.Timeout:
-        st.error("❌ Request timed out. The API took too long to respond.")
-    except requests.exceptions.RequestException as e:
-        st.error(f"❌ API Error: {str(e)}")
-    except KeyError as e:
-        st.error(f"❌ Unexpected response format from API: {str(e)}")
+                # Display sources if available
+                if "sources" in data:
+                    with st.expander("View Sources"):
+                        st.write(data["sources"])
+                        
+                st.session_state.messages.append({"role": "assistant", "content": answer})
+            except Exception as e:
+                st.error("Backend not reachable. Ensure FastAPI is running.")

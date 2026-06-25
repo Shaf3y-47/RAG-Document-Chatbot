@@ -1,5 +1,6 @@
 import os
-from fastapi import FastAPI, HTTPException
+import io
+from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import chromadb
@@ -19,85 +20,85 @@ app.add_middleware(
 
 load_dotenv()
 
-# 1. Initialize local Sentence Transformer embedding model
-# This runs locally inside Python memory—zero api limits, zero network lag.
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
-# 2. Initialize Groq Client for lightning fast text generation
-# Automatically reads GROQ_API_KEY from your .env file
-groq_client = Groq()
+groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
 DB_PATH = "./my_local_vectordb"
 chroma_client = chromadb.PersistentClient(path=DB_PATH)
 collection = chroma_client.get_or_create_collection("docs")
 
 
-def chunk_text(text: str, chunk_size: int = 1000) -> list[str]:
-    return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+def chunk_text(text: str, chunk_size: int = 500, overlap= 50) -> list[str]:
+    start = 0
+    chunks= []
+    while start < len(text):
+        end= start+chunk_size
+        chunks.append(text[start:end])
+        start += chunk_size - overlap
+    
+    return chunks
 
 class ChatQuery(BaseModel):
     question: str
 
-class IngestionResponse(BaseModel):
-    status: str
-    chunks_found: int
-
-@app.post("/ingest", response_model=IngestionResponse)
-async def ingest_local_docs():
-    if not os.path.exists("docs"):
-        raise HTTPException(status_code=404, detail="local 'docs' folder not found")
-
-    if collection.count() > 0:
-        return {"status": "Database already populated", "chunks_found": collection.count()}
-    
-    for filename in os.listdir("docs"):
-        if filename.endswith(".txt"):
-            with open(f"docs/{filename}", mode="r", encoding="utf-8") as f:
-                text = f.read()
-            chunks = chunk_text(text)
-
-            for i, chunk in enumerate(chunks):
-                # Local encoding via sentence-transformers. 
-                # .tolist() converts the numpy array to a standard list for ChromaDB
-                embedding = embedding_model.encode(chunk).tolist()
-                
-                collection.add(
-                    documents=[chunk], 
-                    embeddings=[embedding], 
-                    ids=[f"{filename}_chunk_{i}"],
-                    metadatas=[{"source": filename, "page": None}]
-                )
-        if filename.endswith(".pdf"):
-            reader = PdfReader(f"docs/{filename}")
-            pages = reader.pages
-            
-            # Use enumerate to track the actual page number index safely
-            for page_num, page in enumerate(pages):
-                text = page.extract_text()
-                if not text.strip(): # Skip pages that have no readable text
-                    continue
-                    
-                chunks = chunk_text(text)
-
-                for chunk_idx, chunk in enumerate(chunks):
+@app.post("/ingest")
+def Upload(file: UploadFile | None= None):
+    if not file:
+        return {"message":"Nothing uploaded."}
+    else:
+        try:
+            filename = file.filename
+            inputs = file.file.read()
+            if filename.endswith(".txt"):
+                result = inputs.decode("utf-8")
+                chunks = chunk_text(result)
+                doc_metadata = {
+                "filename": file.filename,
+                "content_type": file.content_type,
+                "size_bytes": len(inputs)
+            }
+                for i, chunk in enumerate(chunks):
                     embedding = embedding_model.encode(chunk).tolist()
-
-                    # Construct a truly unique identifier across all documents
-                    unique_id = f"{filename}_page_{page_num}_chunk_{chunk_idx}"
-
+                            
                     collection.add(
-                        documents=[chunk],
-                        embeddings=[embedding],
-                        ids=[unique_id],
-                        metadatas=[{"source": filename, "page": page_num + 1}] # Highly recommended for tracking
+                        documents=[chunk], 
+                        embeddings=[embedding], 
+                        ids=[f"{filename}_chunk_{i}"],
+                        metadatas=[doc_metadata]
                     )
+            if filename.endswith(".pdf"):
+                reader = PdfReader(io.BytesIO(inputs))
+                pages = reader.pages
+                        
+                for page_num, page in enumerate(pages):
+                    text = page.extract_text()
+                    if not text.strip():
+                        continue
+                                
+                    chunks = chunk_text(text)
+
+                    for chunk_idx, chunk in enumerate(chunks):
+                        embedding = embedding_model.encode(chunk).tolist()
+
+                        unique_id = f"{filename}_page_{page_num}_chunk_{chunk_idx}"
+
+                        collection.add(
+                            documents=[chunk],
+                            embeddings=[embedding],
+                            ids=[unique_id],
+                            metadatas=[{"source": filename, "page": page_num + 1}]
+                        )
+        except Exception as e:
+            return {"Erorr details":f"Unsuccessful upload error detail{e}."}
+
 
     return {"status": "Ingestion successful", "chunks_found": collection.count()}
 
+
 @app.post("/chat")
-async def chat_with_rag(query: ChatQuery):
+def chat_with_rag(query: ChatQuery):
     try:
-        # Encode the incoming user query using the same local model
         query_embedding = embedding_model.encode(query.question).tolist()
 
         result = collection.query(query_embeddings=[query_embedding], n_results=3)
@@ -108,13 +109,13 @@ async def chat_with_rag(query: ChatQuery):
         retrieved_chunks = result["documents"][0]
         context = "\n\n---\n\n".join(retrieved_chunks)
 
-        system_prompt = f"""You are a helpful assistant. Answer the user's question based only on information found within the following context.
-If the answer cannot be found in the context, say 'I cannot find related information in the provided docs.'
+        system_prompt = f"""
+        You are a helpful assistant. Answer the user's question based only on information found within the following context.
+        If the answer cannot be found in the context, say 'I cannot find related information in the provided docs.'
+        Context: 
+        {context}
+        """
 
-Context: 
-{context}"""
-
-        # Execute generation using Groq's high-speed endpoint
         response = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[
