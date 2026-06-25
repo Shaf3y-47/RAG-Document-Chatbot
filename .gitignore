@@ -5,7 +5,7 @@ pdf/
 
 # Databases
 my_local_vectordb/
-pdf_vector_db/
+pdf_vectordb/
 
 # Secrets
 .env
