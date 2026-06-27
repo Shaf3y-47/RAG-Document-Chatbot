@@ -20,13 +20,15 @@ app.add_middleware(
 
 load_dotenv()
 
-embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-
+embedding_model = SentenceTransformer("BAAI/bge-small-en-v1.5")
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-
-DB_PATH = "./my_local_vectordb"
-chroma_client = chromadb.PersistentClient(path=DB_PATH)
-collection = chroma_client.get_or_create_collection("docs")
+chroma_key= os.getenv("CHROMA_KEY")
+chroma_tenant= os.getenv("CHROMA_TENANT")
+chroma_name = os.getenv("CHROMA_NAME")
+chroma_client = chromadb.CloudClient(api_key= chroma_key,
+                                     tenant= chroma_tenant,
+                                     database= chroma_name)
+collection = chroma_client.get_or_create_collection(name="docs")
 
 
 def chunk_text(text: str, chunk_size: int = 500, overlap= 50) -> list[str]:
@@ -90,18 +92,20 @@ def Upload(file: UploadFile | None= None):
                             metadatas=[{"source": filename, "page": page_num + 1}]
                         )
         except Exception as e:
-            return {"Erorr details":f"Unsuccessful upload error detail{e}."}
+            return {"Erorr details":f"Unsuccessfull upload error detail{e}."}
 
 
-    return {"status": "Ingestion successful", "chunks_found": collection.count()}
+    return {"status": "Ingestion successfull", "chunks_found": collection.count()}
 
 
 @app.post("/chat")
 def chat_with_rag(query: ChatQuery):
     try:
-        query_embedding = embedding_model.encode(query.question).tolist()
+        instruction = "Represent this sentence for searching relevant passages: "
+        query_with_instruction = instruction + query.question
+        query_embedding = embedding_model.encode(query_with_instruction).tolist()
 
-        result = collection.query(query_embeddings=[query_embedding], n_results=3)
+        result = collection.query(query_embeddings=[query_embedding], n_results=5)
 
         if not result["documents"] or not result["documents"][0]:
             raise HTTPException(status_code=404, detail="No relevant content found")
@@ -131,3 +135,21 @@ def chat_with_rag(query: ChatQuery):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+    
+
+@app.post("/Clear_Database")
+async def reset_database():
+    global chroma_client 
+    global collection
+    # 1. Delete the collection using the existing client
+    chroma_client.delete_collection(name="docs")
+    # 2. WIPE THE CACHE by completely re-initializing the client
+    chroma_client = chromadb.CloudClient(
+        api_key= chroma_key,
+        tenant= chroma_tenant,
+        database= chroma_name)
+    
+    # 3. Create the fresh collection. The fresh client fetches a real, new UUID.
+    collection = chroma_client.get_or_create_collection(name="docs")
+    
+    return {"message": "Client memory wiped. Fresh collection created"}
